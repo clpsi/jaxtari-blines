@@ -1,0 +1,24 @@
+[project]
+name = "jaxtari-blines"
+version = "0.1.0"
+description = "Simple jax-based baseline implementations for efficient evaluation on JAXtari."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jaxatari @ git+https://github.com/k4ntz/JAXAtari.git",
+    "rtpt>=0.0.4",
+    "wandb[media]>=0.27.0",
+    "hydra-core>=1.3.2",
+    "jax" # use "jax[cuda12]" if no cuda available
+]
+
+[tool.uv]
+override-dependencies = [
+    # uncomment if you are on macos with intel cpu
+    #"jax==0.4.38; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    #"jaxlib==0.4.38; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    # wandb[media] dependencies for intel macos
+    #"rdkit==2025.9.3; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    #"flax==0.10.0; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+

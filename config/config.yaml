@@ -1,0 +1,28 @@
+# experiment params
+NAME_INITIALS: "RE"
+NUM_SEEDS: 1
+SEED: 0
+
+# wandb params
+WANDB_MODE: "online"  # set to online to activate wandb
+ENTITY: ""
+PROJECT: ""
+
+# where to save the params (if None, will not save)
+SAVE_PATH: "./models"
+# upload to huggingface
+UPLOAD_MODEL: False
+
+# default env
+ENV_ID: pong
+
+# choose mods to be active during training, default: None
+TRAIN_MODS: []
+# choose mods to be evaluated after training
+EVAL_MODS: ["lazy_enemy"]
+
+# eval every N steps during training
+EVAL_DURING_TRAIN: True
+EVAL_EVERY: 100 # measured in alg iterations, not env steps
+# whether to capture a video during eval
+CAPTURE_VIDEO: True

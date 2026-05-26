@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="conf">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/.venv/Lib/site-packages/hydra/test_utils/configs/conf.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
