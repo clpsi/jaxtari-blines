@@ -1,0 +1,68 @@
+# Paper-faithful MuZero settings, kept for the comparison against the
+# reference implementation required by the lab. Expensive: one collecting
+# environment, full search width, large batch. Realistically Pong only.
+#
+# Values from Schrittwieser et al. (2019), Appendices C, D and G.
+
+ALG: MUZERO
+EXP_NAME: muzero
+
+PIXEL_BASED: False
+NATIVE_DOWNSCALING: True
+
+TOTAL_TIMESTEPS: 10000000
+
+# --- search ---
+NUM_SIMULATIONS: 50            # MuZero's Atari setting
+MAX_NUM_CONSIDERED_ACTIONS: null
+GUMBEL_C_VISIT: 50
+GUMBEL_C_SCALE: 0.1
+
+# Note: the reference MuZero selects actions with pUCT (c1 = 1.25,
+# c2 = 19652) and samples the acted action from the visit counts under a
+# temperature schedule (1.0 for 500k steps, then 0.5 for 250k, then 0.25).
+# We use the Gumbel search throughout instead, which replaces both mechanisms
+# and needs no Dirichlet noise. This is a deliberate deviation and has to be
+# stated when comparing against the reported scores.
+
+# --- learned model ---
+EMBEDDING_DIM: 256
+NUM_DYNAMICS_BLOCKS: 2
+SCALE_HIDDEN_STATE: True
+UNROLL_STEPS: 5                # K = 5 in all paper experiments
+LOSS_SCALE_BY_UNROLL: True
+DYNAMICS_GRADIENT_SCALE: 0.5
+
+# --- collection ---
+NUM_ENVS: 1
+NUM_STEPS: 32
+SCAN_STEPS: 100
+GRADIENT_STEPS: 1
+
+# --- replay ---
+BUFFER_SIZE: 1000000
+LEARNING_STARTS: 20000
+BATCH_SIZE: 1024               # 1M minibatches of size 1024 in Atari
+
+# Atari draws samples with prioritised replay, priority
+# |search_value - n_step_return|, with alpha = beta = 1.0.
+PRIORITIZED_REPLAY: True
+PER_ALPHA: 1.0
+PER_BETA: 1.0
+
+# --- value and reward targets ---
+GAMMA: 0.997
+N_STEP: 10
+SUPPORT_SIZE: 300
+VALUE_TRANSFORM_EPS: 0.001
+
+# --- loss weights ---
+POLICY_LOSS_COEF: 1.0
+VALUE_LOSS_COEF: 1.0
+REWARD_LOSS_COEF: 1.0
+
+# --- optimisation ---
+LEARNING_RATE: 3.0e-4
+ANNEAL_LR: True
+MAX_GRAD_NORM: 0.5
+WEIGHT_DECAY: 1.0e-4

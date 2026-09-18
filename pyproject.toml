@@ -9,7 +9,9 @@ dependencies = [
     "rtpt>=0.0.4",
     "wandb[media]>=0.27.0",
     "hydra-core>=1.3.2",
-    "jax" # use "jax[cuda12]" if no cuda available
+    "jax",  # use "jax[cuda12]" if no cuda available
+    "mctx>=0.0.71",
+    "flashbax>=0.1.3",
 ]
 
 [tool.uv]

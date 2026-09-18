@@ -1,0 +1,96 @@
+# MuZero: the same Gumbel search, but the tree runs on a learned latent model
+# instead of the real environment. Adds representation/dynamics/prediction
+# networks and their losses on top of the AlphaZero setup.
+#
+# Search:  Danihelka et al. (2022), Policy improvement by planning with Gumbel
+# Algorithm: Schrittwieser et al. (2019), https://arxiv.org/abs/1911.08265
+#
+# Tuned for throughput on a single GPU, not for matching the paper.
+
+ALG: MUZERO
+EXP_NAME: muzero
+
+PIXEL_BASED: False
+NATIVE_DOWNSCALING: True
+
+TOTAL_TIMESTEPS: 10000000
+
+# --- search ---
+# Gumbel search still learns reliably at n=2 on ms_pacman where plain MuZero
+# fails below n=4 (Danihelka Fig. 5a), and going from n=200 to n=16 gave an
+# 11.3x training speedup (Table 1).
+NUM_SIMULATIONS: 16
+
+# Root actions sampled without replacement. The paper uses
+# m = min(n, num_actions) on Atari; null means we compute that in code, since
+# the action count differs per game. Fixing it as low as 4 slowed learning
+# noticeably (Fig. 3b).
+MAX_NUM_CONSIDERED_ACTIONS: null
+
+# Scaling of the normalised Q-values against the policy logits in the Gumbel
+# selection rule. c_scale = 1.0 is the Go/chess setting; Atari uses 0.1
+# because reward scales differ hugely between games. Larger values make the
+# search ignore the prior, which measurably hurt beam_rider (Fig. 5b) - one of
+# our 15 games.
+GUMBEL_C_VISIT: 50
+GUMBEL_C_SCALE: 0.1
+
+# --- learned model ---
+# Three networks: representation h(obs) -> s0, dynamics g(s, a) -> (r, s'),
+# prediction f(s) -> (policy, value). The latent state carries no environment
+# semantics; it only has to support these three predictions.
+EMBEDDING_DIM: 256
+NUM_DYNAMICS_BLOCKS: 2
+
+# Latent states are min-max rescaled to [0, 1], matching the range of the
+# action encoding that gets concatenated into the dynamics function.
+SCALE_HIDDEN_STATE: True
+
+# The model is unrolled K steps from a single observation during training and
+# the losses are summed over all of them.
+UNROLL_STEPS: 5
+
+# Two separate gradient scalings, both needed to keep gradient magnitude
+# roughly constant across unroll steps: each head's loss by 1/K, and the
+# gradient entering the dynamics function by 1/2.
+LOSS_SCALE_BY_UNROLL: True
+DYNAMICS_GRADIENT_SCALE: 0.5
+
+# --- collection ---
+NUM_ENVS: 128
+NUM_STEPS: 32          # rollout length per collection block, well above N_STEP
+SCAN_STEPS: 100        # blocks fused into one compiled scan
+GRADIENT_STEPS: 1
+
+# --- replay ---
+# Items are sequences of UNROLL_STEPS + N_STEP transitions, so this holds far
+# more individual frames than the number suggests.
+BUFFER_SIZE: 100000
+LEARNING_STARTS: 20000
+BATCH_SIZE: 256
+
+# --- value and reward targets ---
+GAMMA: 0.997           # MuZero follows R2D2 here rather than the usual 0.99
+N_STEP: 10             # bootstrap after 10 real steps
+
+# Values and rewards are predicted as distributions over a fixed integer
+# support after the invertible transform
+# h(x) = sign(x)(sqrt(|x|+1) - 1 + eps*x). Without it the losses do not
+# survive games whose scores differ by orders of magnitude.
+# 601 atoms, one per integer in [-300, 300].
+SUPPORT_SIZE: 300
+VALUE_TRANSFORM_EPS: 0.001
+
+# --- loss weights ---
+# Policy target is the improved search policy (mctx action_weights), not raw
+# visit counts.
+POLICY_LOSS_COEF: 1.0
+VALUE_LOSS_COEF: 1.0   # 1.0 in plain MuZero; the 0.25 often quoted belongs to
+                       # MuZero Reanalyze, which we do not implement
+REWARD_LOSS_COEF: 1.0
+
+# --- optimisation ---
+LEARNING_RATE: 3.0e-4
+ANNEAL_LR: True
+MAX_GRAD_NORM: 0.5
+WEIGHT_DECAY: 1.0e-4
