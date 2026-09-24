@@ -16,6 +16,9 @@ def main(config):
         elif merged_config["ALG"] == "ALPHAZERO":
             from agents.alphazero.alphazero import single_run
             run_fn = single_run
+        elif merged_config["ALG"] == "MUZERO":
+            from agents.muzero.muzero import single_run
+            run_fn = single_run
         print(f"Running seed {seed} ...")
         merged_config["SEED"] = seed
         metrics = run_fn(merged_config)

@@ -1,0 +1,63 @@
+# MuZero: RGB (pixel-based) variant for Atari
+#
+# Same Gumbel search as the OC variant but runs on raw pixel observations
+# instead of object-centric features. The representation network encodes
+# the raw pixels into a latent state.
+#
+# Based on arXiv 1911.08265 (MuZero) and adapted from
+# agents/alphazero/alphazero.py.
+
+ALG: MUZERO
+EXP_NAME: muzero
+
+PIXEL_BASED: True
+NATIVE_DOWNSCALING: True
+
+TOTAL_TIMESTEPS: 10000000
+
+# --- search ---
+NUM_SIMULATIONS: 50
+MAX_NUM_CONSIDERED_ACTIONS: null
+GUMBEL_C_VISIT: 50
+GUMBEL_C_SCALE: 0.1
+
+# --- learned model ---
+EMBEDDING_DIM: 256
+NUM_DYNAMICS_BLOCKS: 2
+SCALE_HIDDEN_STATE: True
+UNROLL_STEPS: 5
+LOSS_SCALE_BY_UNROLL: True
+DYNAMICS_GRADIENT_SCALE: 0.5
+
+# --- collection ---
+NUM_ENVS: 1
+NUM_STEPS: 32
+SCAN_STEPS: 100
+GRADIENT_STEPS: 1
+
+# --- replay ---
+# Raw stacked frames need 28,224 bytes per state even as uint8. A one-million
+# state buffer would therefore consume 28.2 GB (or 112.9 GB as float32), before
+# JAX compilation and model activations. This implementation stores raw stacks,
+# rather than DQN-style deduplicated frames, so use a capacity that fits a normal
+# single GPU.
+BUFFER_SIZE: 20000
+LEARNING_STARTS: 5000
+BATCH_SIZE: 128
+
+# --- value and reward targets ---
+GAMMA: 0.997
+N_STEP: 10
+SUPPORT_SIZE: 300
+VALUE_TRANSFORM_EPS: 0.001
+
+# --- loss weights ---
+POLICY_LOSS_COEF: 1.0
+VALUE_LOSS_COEF: 1.0
+REWARD_LOSS_COEF: 1.0
+
+# --- optimisation ---
+LEARNING_RATE: 3.0e-4
+ANNEAL_LR: True
+MAX_GRAD_NORM: 0.5
+WEIGHT_DECAY: 1.0e-4

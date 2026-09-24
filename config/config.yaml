@@ -4,7 +4,7 @@ NUM_SEEDS: 1
 SEED: 0
 
 # wandb params
-WANDB_MODE: "online"  # set to online to activate wandb
+WANDB_MODE: "offline"  # set to online to activate wandb
 ENTITY: ""
 PROJECT: ""
 
