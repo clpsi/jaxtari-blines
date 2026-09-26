@@ -114,22 +114,15 @@ class MLPTorso(nn.Module):
         return nn.relu(nn.Dense(512, kernel_init=orthogonal(jnp.sqrt(2.0)), bias_init=constant(0.0))(x))
 
 
-def _normalise_latent(x):
-    lo = jnp.min(x, axis=-1, keepdims=True)
-    hi = jnp.max(x, axis=-1, keepdims=True)
-    return (x - lo) / jnp.maximum(hi - lo, 1e-5)
-
-
 class Representation(nn.Module):
     embedding_dim: int
     pixel_based: bool
-    scale_hidden_state: bool
 
     @nn.compact
     def __call__(self, obs):
         hidden = CNNTorso()(obs) if self.pixel_based else MLPTorso()(obs)
         latent = nn.relu(nn.Dense(self.embedding_dim, kernel_init=orthogonal(jnp.sqrt(2.0)))(hidden))
-        return _normalise_latent(latent) if self.scale_hidden_state else latent
+        return latent
 
 
 class Dynamics(nn.Module):
@@ -137,7 +130,6 @@ class Dynamics(nn.Module):
     embedding_dim: int
     support_size: int
     num_blocks: int
-    scale_hidden_state: bool
     gradient_scale: float
 
     @nn.compact
@@ -152,8 +144,6 @@ class Dynamics(nn.Module):
             x = nn.relu(nn.Dense(self.embedding_dim, kernel_init=orthogonal(jnp.sqrt(2.0)))(x))
         reward_logits = nn.Dense(2 * self.support_size + 1, kernel_init=orthogonal(0.01))(x)
         next_latent = nn.relu(nn.Dense(self.embedding_dim, kernel_init=orthogonal(jnp.sqrt(2.0)))(x))
-        if self.scale_hidden_state:
-            next_latent = _normalise_latent(next_latent)
         return reward_logits, next_latent
 
 
@@ -176,13 +166,12 @@ class MuZeroNetwork(nn.Module):
     pixel_based: bool
     embedding_dim: int = 256
     num_dynamics_blocks: int = 2
-    scale_hidden_state: bool = True
     dynamics_gradient_scale: float = 0.5
 
     def setup(self):
-        self.representation_network = Representation(self.embedding_dim, self.pixel_based, self.scale_hidden_state)
+        self.representation_network = Representation(self.embedding_dim, self.pixel_based)
         self.dynamics_network = Dynamics(self.action_dim, self.embedding_dim, self.support_size,
-                                         self.num_dynamics_blocks, self.scale_hidden_state,
+                                         self.num_dynamics_blocks,
                                          self.dynamics_gradient_scale)
         self.prediction_network = Prediction(self.action_dim, self.embedding_dim, self.support_size)
 
@@ -257,7 +246,6 @@ def single_run(config: dict):
     network_kwargs = dict(action_dim=action_dim, support_size=support_size, pixel_based=pixel_based,
                           embedding_dim=config.get("EMBEDDING_DIM", 256),
                           num_dynamics_blocks=config.get("NUM_DYNAMICS_BLOCKS", 2),
-                          scale_hidden_state=config.get("SCALE_HIDDEN_STATE", True),
                           dynamics_gradient_scale=config.get("DYNAMICS_GRADIENT_SCALE", 0.5))
     network = MuZeroNetwork(**network_kwargs)
     key, init_key = jax.random.split(key)
