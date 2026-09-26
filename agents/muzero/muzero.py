@@ -1,8 +1,14 @@
 """Latent-model MuZero for JAXtari.
 
-The implementation follows MuZero (Schrittwieser et al., 2019): representation,
-dynamics, and prediction networks; latent-space MCTS; and trajectory replay with
-unrolled policy, value, and reward losses.
+References
+----------
+* Schrittwieser et al. (2020), ``Mastering Atari, Go, Chess and Shogi by
+  Planning with a Learned Model``, arXiv:1911.08265v2 (MuZero).
+* Silver et al. (2017), ``Mastering Chess and Shogi by Self-Play with a General
+  Reinforcement Learning Algorithm``, arXiv:1712.01815v1 (AlphaZero).
+
+The section layout deliberately mirrors ``agents/alphazero/alphazero.py``.
+Comments mark the MuZero paper section that specifies each algorithmic part.
 """
 
 import os
@@ -49,6 +55,10 @@ def make_env(env_id, mods=None, pixel_based=True, native_downscaling=True, eval=
     return thunk
 
 
+# --------------------------------------------------------------------------- #
+# MuZero Appendix F: categorical value and reward representation
+# --------------------------------------------------------------------------- #
+
 def value_transform(x, eps=0.001):
     return jnp.sign(x) * (jnp.sqrt(jnp.abs(x) + 1.0) - 1.0) + eps * x
 
@@ -78,6 +88,14 @@ def scale_gradient(x, scale):
     """Identity in the forward pass with a scaled backward gradient."""
     return jax.lax.stop_gradient(x) + scale * (x - jax.lax.stop_gradient(x))
 
+
+# --------------------------------------------------------------------------- #
+# MuZero §3 and Appendix F: h (representation), g (dynamics), f (prediction)
+#
+# The paper's Atari network is a much larger residual model over 32 RGB frames.
+# This project uses the same compact DQN-style image encoder as alphazero.py so
+# RGB and object-centric runs remain feasible on a single accelerator.
+# --------------------------------------------------------------------------- #
 
 class CNNTorso(nn.Module):
     @nn.compact
@@ -124,6 +142,11 @@ class Dynamics(nn.Module):
 
     @nn.compact
     def __call__(self, latent, action):
+        # MuZero Appendix G scales gradients *at the input to g* by 1/2.
+        # Scaling g's output, as the previous version did, incorrectly scales
+        # gradients of the current dynamics parameters instead of the recurrent
+        # gradient entering the preceding hidden state.
+        latent = scale_gradient(latent, self.gradient_scale)
         x = jnp.concatenate((latent, jax.nn.one_hot(action, self.action_dim)), axis=-1)
         for _ in range(self.num_blocks):
             x = nn.relu(nn.Dense(self.embedding_dim, kernel_init=orthogonal(jnp.sqrt(2.0)))(x))
@@ -131,7 +154,7 @@ class Dynamics(nn.Module):
         next_latent = nn.relu(nn.Dense(self.embedding_dim, kernel_init=orthogonal(jnp.sqrt(2.0)))(x))
         if self.scale_hidden_state:
             next_latent = _normalise_latent(next_latent)
-        return reward_logits, scale_gradient(next_latent, self.gradient_scale)
+        return reward_logits, next_latent
 
 
 class Prediction(nn.Module):
@@ -186,6 +209,10 @@ class Trajectory:
     policy: jnp.ndarray
     root_value: jnp.ndarray
 
+
+# --------------------------------------------------------------------------- #
+# MuZero §3, Eq. (1), and Appendix G: n-step bootstrap targets
+# --------------------------------------------------------------------------- #
 
 def _n_step_target(rewards, dones, bootstrap, gamma):
     target = bootstrap
@@ -250,6 +277,10 @@ def single_run(config: dict):
                                  weight_decay=config.get("WEIGHT_DECAY", 1e-4)))
     agent_state = TrainState.create(apply_fn=network.apply, params=params, tx=tx)
 
+    # ----------------------------------------------------------------------- #
+    # MuZero §3: MCTS in learned latent space
+    # ----------------------------------------------------------------------- #
+
     def recurrent_fn(params, rng_key, action, latent):
         del rng_key
         reward, next_latent, policy, value = network.apply(params, latent, action, method=MuZeroNetwork.recurrent)
@@ -257,15 +288,53 @@ def single_run(config: dict):
                                       discount=jnp.full(action.shape, gamma, dtype=jnp.float32),
                                       prior_logits=policy, value=support_to_scalar(value, support_size, transform_eps)), next_latent
 
-    qtransform = partial(mctx.qtransform_completed_by_mix_value, value_scale=config.get("GUMBEL_C_SCALE", 0.1),
-                         maxvisit_init=config.get("GUMBEL_C_VISIT", 50))
+    search_algorithm = config.get("SEARCH_ALGORITHM", "puct").lower()
+    if search_algorithm not in {"puct", "gumbel"}:
+        raise ValueError("SEARCH_ALGORITHM must be 'puct' or 'gumbel'")
+    gumbel_qtransform = partial(
+        mctx.qtransform_completed_by_mix_value,
+        value_scale=config.get("GUMBEL_C_SCALE", 0.1),
+        maxvisit_init=config.get("GUMBEL_C_VISIT", 50),
+    )
 
-    def run_search(params, rng_key, obs):
+    def visit_temperature(step):
+        """MuZero Appendix D's Atari visit-count temperature schedule."""
+        first = config.get("TEMPERATURE_STEP_1", 500_000)
+        second = config.get("TEMPERATURE_STEP_2", 750_000)
+        return jnp.where(
+            step < first,
+            config.get("TEMPERATURE_1", 1.0),
+            jnp.where(step < second, config.get("TEMPERATURE_2", 0.5),
+                      config.get("TEMPERATURE_3", 0.25)),
+        )
+
+    def run_search(params, rng_key, obs, temperature):
         latent, policy, value = network.apply(params, obs)
         root = mctx.RootFnOutput(prior_logits=policy, value=support_to_scalar(value, support_size, transform_eps), embedding=latent)
-        return mctx.gumbel_muzero_policy(params=params, rng_key=rng_key, root=root, recurrent_fn=recurrent_fn,
-                                         num_simulations=num_simulations, qtransform=qtransform,
-                                         max_num_considered_actions=max_considered)
+        if search_algorithm == "puct":
+            # MuZero §3 and Appendix D: MCTS returns visit counts, actions are
+            # sampled from those counts with the scheduled temperature.
+            return mctx.muzero_policy(
+                params=params, rng_key=rng_key, root=root, recurrent_fn=recurrent_fn,
+                num_simulations=num_simulations,
+                qtransform=mctx.qtransform_by_parent_and_siblings,
+                dirichlet_fraction=config.get("DIRICHLET_FRACTION", 0.25),
+                dirichlet_alpha=config.get("DIRICHLET_ALPHA", 0.3),
+                pb_c_init=config.get("PUCT_C_INIT", 1.25),
+                pb_c_base=config.get("PUCT_C_BASE", 19652),
+                temperature=temperature,
+            )
+        # Optional compatibility path for alphazero.py and the Gumbel MuZero
+        # paper. It is deliberately not the default for the paper presets.
+        return mctx.gumbel_muzero_policy(
+            params=params, rng_key=rng_key, root=root, recurrent_fn=recurrent_fn,
+            num_simulations=num_simulations, qtransform=gumbel_qtransform,
+            max_num_considered_actions=max_considered,
+        )
+
+    # ----------------------------------------------------------------------- #
+    # MuZero Appendix G: trajectory replay, not independent-state replay
+    # ----------------------------------------------------------------------- #
 
     max_time = max(sequence_length, config.get("BUFFER_SIZE", 100_000) // num_envs)
     min_time = min(max_time, max(sequence_length, config.get("LEARNING_STARTS", 20_000) // num_envs))
@@ -289,15 +358,21 @@ def single_run(config: dict):
                                           jnp.array(0.0, jnp.float32), jnp.array(False),
                                           jnp.zeros((action_dim,), jnp.float32), jnp.array(0.0, jnp.float32)))
 
-    def collect_rollout(params, rng, env_state, obs):
-        def step_fn(carry, _):
+    # ----------------------------------------------------------------------- #
+    # MuZero Figure 1B / AlphaZero §: search, act, then save pi, nu, u
+    # ----------------------------------------------------------------------- #
+
+    def collect_rollout(params, rng, env_state, obs, start_step):
+        def step_fn(carry, time_index):
             env_state, obs, rng = carry
             rng, search_key = jax.random.split(rng)
-            search = run_search(params, search_key, obs)
+            search = run_search(params, search_key, obs, visit_temperature(start_step + time_index * num_envs))
             next_obs, next_state, reward, done, info = vmap_step(env_state, search.action)
             item = Trajectory(obs, search.action, reward, done, search.action_weights, search.search_tree.node_values[:, 0])
             return (next_state, next_obs, rng), (item, info)
-        (env_state, obs, rng), (trajectory, infos) = jax.lax.scan(step_fn, (env_state, obs, rng), None, length=num_steps)
+        (env_state, obs, rng), (trajectory, infos) = jax.lax.scan(
+            step_fn, (env_state, obs, rng), jnp.arange(num_steps)
+        )
         return env_state, obs, rng, trajectory, infos
 
     def masked_cross_entropy(logits, target, mask, importance_weights):
@@ -305,8 +380,12 @@ def single_run(config: dict):
         weights = mask * importance_weights
         return jnp.sum(loss * weights) / jnp.maximum(jnp.sum(weights), 1.0)
 
+    # ----------------------------------------------------------------------- #
+    # MuZero Figure 1C, §3 Eq. (1), and Appendix G: BPTT training loss
+    # ----------------------------------------------------------------------- #
+
     def loss_fn(params, batch, importance_weights):
-        """Unroll the learned dynamics K times and apply the three MuZero losses."""
+        """Unroll g on real actions and supervise p, v, and r at every step."""
         latent, policy_logits, value_logits = network.apply(params, batch.obs[:, 0])
         active = jnp.ones((batch.obs.shape[0],), jnp.float32)
         policy_loss = masked_cross_entropy(policy_logits, batch.policy[:, 0], active, importance_weights)
@@ -328,7 +407,9 @@ def single_run(config: dict):
                                           batch.root_value[:, target_step + n_step], gamma)
             value_loss += masked_cross_entropy(value_logits,
                                                scalar_to_support(value_target, support_size, transform_eps), active, importance_weights)
-        scale = float(unroll_steps + 1) if config.get("LOSS_SCALE_BY_UNROLL", True) else 1.0
+        # Appendix G specifies 1/K for every head. There are K recurrent
+        # transitions and K+1 policy/value predictions (the root included).
+        scale = float(unroll_steps) if config.get("LOSS_SCALE_BY_UNROLL", True) else 1.0
         policy_loss, value_loss = policy_loss / scale, value_loss / scale
         reward_loss /= max(float(unroll_steps), 1.0) if config.get("LOSS_SCALE_BY_UNROLL", True) else 1.0
         total = (config.get("POLICY_LOSS_COEF", 1.0) * policy_loss + config.get("VALUE_LOSS_COEF", 1.0) * value_loss
@@ -341,7 +422,9 @@ def single_run(config: dict):
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
     def full_step(agent_state, buffer_state, env_state, obs, rng, global_step):
-        env_state, next_obs, rng, trajectory, infos = collect_rollout(agent_state.params, rng, env_state, obs)
+        env_state, next_obs, rng, trajectory, infos = collect_rollout(
+            agent_state.params, rng, env_state, obs, global_step
+        )
         trajectory = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), trajectory)
         # Pixel replay stores unnormalised frames.  Keeping this uint8 avoids a
         # fourfold buffer expansion; CNNTorso converts it to float32 on sampling.
@@ -396,7 +479,9 @@ def single_run(config: dict):
             returns, states = evaluate(model_path, partial(make_env, mods=mods, pixel_based=pixel_based,
                 native_downscaling=config.get("NATIVE_DOWNSCALING", True), eval=True), config["ENV_ID"], 10,
                 MuZeroNetwork, support_to_scalar, network_kwargs, support_size, transform_eps, num_simulations,
-                max_considered, config.get("GUMBEL_C_VISIT", 50), config.get("GUMBEL_C_SCALE", 0.1), gamma, config["SEED"] + 42)
+                max_considered, search_algorithm, config.get("GUMBEL_C_VISIT", 50),
+                config.get("GUMBEL_C_SCALE", 0.1), config.get("PUCT_C_INIT", 1.25),
+                config.get("PUCT_C_BASE", 19652), gamma, config["SEED"] + 42)
             metrics[label] = float(np.mean(jax.device_get(returns)))
             wandb.log({f"eval/episodic_return_{label}": metrics[label]}, step=step_count)
             if config.get("CAPTURE_VIDEO", False):
